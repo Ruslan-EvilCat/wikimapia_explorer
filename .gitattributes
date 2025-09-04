@@ -1,0 +1,40 @@
+# Normalize line endings and silence CRLF/LF warnings
+* text=auto
+
+# Enforce LF for source and config files
+*.kt text eol=lf
+*.kts text eol=lf
+*.java text eol=lf
+*.gradle text eol=lf
+*.gradle.kts text eol=lf
+*.xml text eol=lf
+*.md text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.properties text eol=lf
+*.toml text eol=lf
+gradlew text eol=lf
+
+# Windows scripts keep CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+gradlew.bat text eol=crlf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.jar binary
+*.keystore binary
+*.jks binary
+*.apk binary
+*.aar binary
+*.so binary
+*.zip binary
+*.gz binary
+*.7z binary
