@@ -1,0 +1,318 @@
+package com.neonpurple.wikimapiaexplorer.ui
+
+import android.Manifest
+import android.content.pm.PackageManager
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.util.Log
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import android.view.ViewGroup
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material3.FloatingActionButton
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AssistChip
+import androidx.compose.material3.AssistChipDefaults
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.content.ContextCompat
+import com.google.android.gms.location.LocationServices
+import com.google.android.gms.location.Priority
+import com.google.android.gms.tasks.CancellationTokenSource
+import org.mapsforge.core.model.LatLong
+import org.mapsforge.map.android.util.AndroidUtil
+import org.mapsforge.map.android.view.MapView
+import org.mapsforge.map.layer.download.TileDownloadLayer
+import org.mapsforge.map.layer.download.tilesource.OpenStreetMapMapnik
+import org.mapsforge.map.layer.overlay.Marker
+import org.mapsforge.map.layer.overlay.Circle
+import org.mapsforge.core.graphics.Style
+import org.mapsforge.map.model.common.Observer
+import org.mapsforge.map.android.graphics.AndroidGraphicFactory
+
+@Composable
+fun MapScreen(
+    modifier: Modifier = Modifier,
+    places: List<PlaceUi> = emptyList(),
+    onPlaceSelected: (PlaceUi) -> Unit = {},
+    onRecenterClick: () -> Unit = {},
+    onRefresh: (lat: Double, lon: Double) -> Unit = { _, _ -> },
+    isLoading: Boolean = false,
+    radius: Int = 500,
+    onChangeRadius: (Int) -> Unit = {},
+) {
+    val context = LocalContext.current
+    val mapView = remember {
+        MapView(context).apply {
+            layoutParams = ViewGroup.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            )
+        }
+    }
+
+    // Configure online OSM tiles and add as a layer
+    DisposableEffect(mapView) {
+        val tileCache = AndroidUtil.createTileCache(
+            context,
+            "mapcache",
+            mapView.model.displayModel.tileSize,
+            1.5f,
+            1024.0
+        )
+
+        val tileSource = OpenStreetMapMapnik.INSTANCE.apply {
+            setUserAgent("WikimapiaExplorer/1.0 (+contact@example.com)")
+        }
+
+        val layer = TileDownloadLayer(
+            tileCache,
+            mapView.model.mapViewPosition,
+            tileSource,
+            AndroidGraphicFactory.INSTANCE
+        )
+
+        // Redraw on camera move/zoom to refill any blanks
+        val positionObserver = Observer {
+            Log.d("TileDownload", "Camera moved/zoomed; request map repaint")
+            mapView.repaint()
+        }
+
+        mapView.layerManager.layers.add(layer)
+        mapView.model.mapViewPosition.addObserver(positionObserver)
+
+        // Initial camera
+        mapView.model.mapViewPosition.center = LatLong(37.7749, -122.4194)
+        mapView.model.mapViewPosition.zoomLevel = 14.toByte()
+
+        // Resume downloads (for this Mapsforge version no MapView.onResume())
+        try {
+            // Prefer onResume if available (Mapsforge >= 0.20)
+            layer.javaClass.getMethod("onResume").invoke(layer)
+        } catch (_: Throwable) {
+            // Fallback to start() if older API
+            try { layer.start() } catch (_: Throwable) {}
+        }
+
+        // Minimal retry: delayed redraw once
+        mapView.postDelayed({
+            try {
+                Log.d("TileDownload", "Delayed repaint to retry missing tiles")
+                mapView.repaint()
+            } catch (_: Throwable) { }
+        }, 600L)
+
+        onDispose {
+            try {
+                // Prefer onPause if available; otherwise onDestroy to stop threads
+                layer.javaClass.getMethod("onPause").invoke(layer)
+            } catch (_: Throwable) {
+                try { layer.javaClass.getMethod("onDestroy").invoke(layer) } catch (_: Throwable) {}
+            }
+            mapView.model.mapViewPosition.removeObserver(positionObserver)
+            mapView.layerManager.layers.remove(layer)
+            // Release native/resources when leaving the screen
+            runCatching { mapView.destroy() }
+        }
+    }
+
+    // My location marker state
+    var myLocationMarker by remember { mutableStateOf<Circle?>(null) }
+    // Place markers state
+    var placeMarkers by remember { mutableStateOf<List<Marker>>(emptyList()) }
+
+    Surface(color = MaterialTheme.colorScheme.background) {
+        Box(modifier = modifier.fillMaxSize()) {
+            AndroidView(
+                modifier = Modifier.fillMaxSize(),
+                factory = { mapView }
+            )
+
+            val fusedClient = remember { LocationServices.getFusedLocationProviderClient(context) }
+            var pendingRecenter by remember { mutableStateOf(false) }
+            val permissionLauncher = rememberLauncherForActivityResult(
+                contract = ActivityResultContracts.RequestMultiplePermissions()
+            ) { grantMap ->
+                val granted = (grantMap[Manifest.permission.ACCESS_FINE_LOCATION] == true
+                        || grantMap[Manifest.permission.ACCESS_COARSE_LOCATION] == true)
+                if (granted && pendingRecenter) {
+                    performRecenter(mapView, fusedClient) { circle ->
+                        // Update circle marker
+                        myLocationMarker?.let { mapView.layerManager.layers.remove(it) }
+                        myLocationMarker = circle
+                        mapView.layerManager.layers.add(circle)
+                    }
+                }
+                pendingRecenter = false
+            }
+
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomEnd)
+                    .padding(16.dp),
+                horizontalAlignment = Alignment.End
+            ) {
+                FloatingActionButton(onClick = {
+                    val hasFine = ContextCompat.checkSelfPermission(
+                        context, Manifest.permission.ACCESS_FINE_LOCATION
+                    ) == PackageManager.PERMISSION_GRANTED
+                    val hasCoarse = ContextCompat.checkSelfPermission(
+                        context, Manifest.permission.ACCESS_COARSE_LOCATION
+                    ) == PackageManager.PERMISSION_GRANTED
+                    if (hasFine || hasCoarse) {
+                        performRecenter(mapView, fusedClient) { circle ->
+                            myLocationMarker?.let { mapView.layerManager.layers.remove(it) }
+                            myLocationMarker = circle
+                            mapView.layerManager.layers.add(circle)
+                        }
+                    } else {
+                        pendingRecenter = true
+                        permissionLauncher.launch(
+                            arrayOf(
+                                Manifest.permission.ACCESS_FINE_LOCATION,
+                                Manifest.permission.ACCESS_COARSE_LOCATION
+                            )
+                        )
+                    }
+                    onRecenterClick()
+                }) {
+                    Icon(imageVector = Icons.Default.Refresh, contentDescription = "Recenter")
+                }
+                FloatingActionButton(
+                    onClick = {
+                        if (!isLoading) {
+                            val center = mapView.model.mapViewPosition.center
+                            onRefresh(center.latitude, center.longitude)
+                        }
+                    },
+                    modifier = Modifier.padding(top = 12.dp)
+                ) {
+                    Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh")
+                }
+                if (isLoading) {
+                    CircularProgressIndicator(modifier = Modifier.padding(top = 12.dp))
+                }
+            }
+
+            // Radius chips bottom-left
+            Column(
+                modifier = Modifier
+                    .align(Alignment.BottomStart)
+                    .padding(16.dp)
+            ) {
+                androidx.compose.foundation.layout.Row {
+                    listOf(200, 500, 1000).forEach { r ->
+                        val selected = r == radius
+                        AssistChip(
+                            onClick = { onChangeRadius(r) },
+                            label = { Text(if (r >= 1000) "${r/1000} km" else "${r} m") },
+                            colors = AssistChipDefaults.assistChipColors(
+                                containerColor = if (selected) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface
+                            ),
+                            modifier = Modifier.padding(end = 8.dp)
+                        )
+                    }
+                }
+            }
+
+            // Simple error banner (if any)
+            // Note: Provided via places/error in ViewModel; displayed by MainActivity if desired.
+        }
+    }
+
+    // Update place markers whenever the list changes
+    DisposableEffect(places) {
+        // Clear previous markers
+        placeMarkers.forEach { mapView.layerManager.layers.remove(it) }
+        placeMarkers = emptyList()
+        if (places.isNotEmpty()) {
+            // Build a small pin bitmap (mapsforge) once
+            val size = 24
+            val mfPin = AndroidGraphicFactory.INSTANCE.createBitmap(size, size)
+            val mfCanvas = AndroidGraphicFactory.INSTANCE.createCanvas().apply { setBitmap(mfPin) }
+            val pinFill = AndroidGraphicFactory.INSTANCE.createPaint().apply {
+                color = AndroidGraphicFactory.INSTANCE.createColor(255, 229, 57, 53)
+                setStyle(Style.FILL)
+                strokeWidth = 0f
+            }
+            val pinStroke = AndroidGraphicFactory.INSTANCE.createPaint().apply {
+                color = AndroidGraphicFactory.INSTANCE.createColor(255, 255, 255, 255)
+                setStyle(Style.STROKE)
+                strokeWidth = 2f
+            }
+            val cx = size / 2
+            val cy = size / 2
+            val r = (size / 2) - 2
+            mfCanvas.drawCircle(cx, cy, r, pinFill)
+            mfCanvas.drawCircle(cx, cy, r, pinStroke)
+
+            val newMarkers = places.map { p ->
+                object : Marker(LatLong(p.lat, p.lon), mfPin, 0, 0) {
+                    override fun onTap(
+                        tapLatLong: LatLong?,
+                        layerXY: org.mapsforge.core.model.Point?,
+                        tapXY: org.mapsforge.core.model.Point?
+                    ): Boolean {
+                        onPlaceSelected(p)
+                        return true
+                    }
+                }
+            }
+            newMarkers.forEach { mapView.layerManager.layers.add(it) }
+            placeMarkers = newMarkers
+        }
+        onDispose { /* markers removed above */ }
+    }
+}
+
+private fun performRecenter(
+    mapView: MapView,
+    fusedClient: com.google.android.gms.location.FusedLocationProviderClient,
+    onMarkerReady: (Circle) -> Unit,
+) {
+    val cts = CancellationTokenSource()
+    fun setCamera(lat: Double, lon: Double) {
+        mapView.model.mapViewPosition.center = LatLong(lat, lon)
+        mapView.model.mapViewPosition.zoomLevel = 15.toByte()
+        val fill = AndroidGraphicFactory.INSTANCE.createPaint().apply {
+            color = AndroidGraphicFactory.INSTANCE.createColor(255, 66, 133, 244)
+            setStyle(Style.FILL)
+            strokeWidth = 0f
+        }
+        val stroke = AndroidGraphicFactory.INSTANCE.createPaint().apply {
+            color = AndroidGraphicFactory.INSTANCE.createColor(255, 255, 255, 255)
+            setStyle(Style.STROKE)
+            strokeWidth = 3f
+        }
+        val circle = Circle(LatLong(lat, lon), 12f, fill, stroke)
+        onMarkerReady(circle)
+    }
+
+    fusedClient.lastLocation
+        .addOnSuccessListener { loc ->
+            if (loc != null) setCamera(loc.latitude, loc.longitude) else {
+                fusedClient.getCurrentLocation(Priority.PRIORITY_BALANCED_POWER_ACCURACY, cts.token)
+                    .addOnSuccessListener { cur ->
+                        if (cur != null) setCamera(cur.latitude, cur.longitude)
+                    }
+            }
+        }
+}
