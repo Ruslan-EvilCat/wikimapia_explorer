@@ -18,7 +18,6 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.AssistChip
 import androidx.compose.material3.AssistChipDefaults
 import androidx.compose.material3.Text
@@ -54,8 +53,6 @@ fun MapScreen(
     places: List<PlaceUi> = emptyList(),
     onPlaceSelected: (PlaceUi) -> Unit = {},
     onRecenterClick: () -> Unit = {},
-    onRefresh: (lat: Double, lon: Double) -> Unit = { _, _ -> },
-    isLoading: Boolean = false,
     radius: Int = 500,
     onChangeRadius: (Int) -> Unit = {},
 ) {
@@ -167,7 +164,8 @@ fun MapScreen(
             Column(
                 modifier = Modifier
                     .align(Alignment.BottomEnd)
-                    .padding(16.dp),
+                    // Move the button higher from the bottom edge
+                    .padding(bottom = 120.dp, end = 16.dp),
                 horizontalAlignment = Alignment.End
             ) {
                 FloatingActionButton(onClick = {
@@ -195,20 +193,6 @@ fun MapScreen(
                     onRecenterClick()
                 }) {
                     Icon(imageVector = Icons.Default.Refresh, contentDescription = "Recenter")
-                }
-                FloatingActionButton(
-                    onClick = {
-                        if (!isLoading) {
-                            val center = mapView.model.mapViewPosition.center
-                            onRefresh(center.latitude, center.longitude)
-                        }
-                    },
-                    modifier = Modifier.padding(top = 12.dp)
-                ) {
-                    Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh")
-                }
-                if (isLoading) {
-                    CircularProgressIndicator(modifier = Modifier.padding(top = 12.dp))
                 }
             }
 

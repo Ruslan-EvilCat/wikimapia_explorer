@@ -52,8 +52,6 @@ private fun AppContent(vm: MapViewModel) {
         places = state.places,
         onPlaceSelected = { selectedPlace = it },
         onRecenterClick = { /* handled inside MapScreen */ },
-        onRefresh = { lat, lon -> vm.refreshNearby(lat, lon) },
-        isLoading = state.isLoading,
         radius = state.radius,
         onChangeRadius = { vm.setRadius(it) }
     )
